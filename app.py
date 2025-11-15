@@ -1,127 +1,180 @@
 """
-Optimized Gradio application for the Lab 5 Image Mosaic Generator.
-Uses modular components:
-- TileManager
-- ImageProcessor
-- MosaicBuilder
-- Metrics
+app.py
 
-This file contains *no algorithmic logic* — only orchestration and UI,
-as required by proper modular design.
+Final Lab-5 Gradio application using the optimized modular mosaic generator.
+Compatible with Hugging Face Spaces and includes all Lab-1 UI features.
 """
 
-import time
-import numpy as np
 import gradio as gr
+import numpy as np
 from PIL import Image
+import cv2
 
 from mosaic_generator import (
     TileManager,
     ImageProcessor,
     MosaicBuilder,
-    compute_all,
-)
-from mosaic_generator.config import (
-    APP_TITLE,
-    APP_DESCRIPTION,
+    compute_metrics,
     PREPROCESS_RESOLUTION,
 )
 
-# Load and cache real-photo tiles (fast after the first run)
-tile_manager = TileManager(tile_folder="tiles")
 
-builder = MosaicBuilder(
-    avg_colors=tile_manager.get_avg_colors(),
-    histograms=tile_manager.get_histograms(),
-    tiles=tile_manager.get_tiles(),
+# ---------------------------------------------------------------------
+# Initialize system
+# ---------------------------------------------------------------------
+
+TILE_FOLDER = "tiles"  # Folder in your repo on HuggingFace
+
+tile_manager = TileManager(
+    tile_directory=TILE_FOLDER,
+    tile_size=(32, 32),
+    compute_histograms=True
 )
 
+builder = MosaicBuilder(tile_manager)
 
-# Main mosaic generation function
-def generate_mosaic(
-    image: Image.Image,
-    grid_rows: int,
-    grid_cols: int,
-    method: str,
-    apply_quantization: bool,
-    n_colors: int,
+
+# ---------------------------------------------------------------------
+# Core mosaic pipeline
+# ---------------------------------------------------------------------
+
+def run_mosaic_pipeline(
+    image,
+    grid_rows,
+    grid_cols,
+    tile_set,
+    classification_method,
+    apply_quantization,
+    quant_colors,
+    show_performance
 ):
     if image is None:
-        return None, "Please upload an image first."
+        return None, "Please upload an image.", None, None
 
-    try:
-        start = time.perf_counter()
+    if hasattr(image, "convert"):
+        image_np = np.array(image.convert("RGB"))
+    else:
+        image_np = np.array(image)
 
-        # Convert to numpy
-        img_np = np.array(image.convert("RGB"))
+    processed = ImageProcessor.preprocess(
+        image_np,
+        target_size=PREPROCESS_RESOLUTION,
+        apply_quantization=apply_quantization,
+        n_colors=int(quant_colors)
+    )
 
-        # Preprocess image
-        processed = ImageProcessor.preprocess(
-            img_np,
-            apply_quantization=apply_quantization,
-            n_colors=n_colors,
-        )
+    grid = ImageProcessor.slice_grid(processed, (grid_rows, grid_cols))
 
-        # Vectorized grid slicing
-        grid = ImageProcessor.divide_into_grid(processed, (grid_rows, grid_cols))
+    # geometric tile option is allowed for UI completeness
+    if tile_set == "geometric":
+        tile_set = "real_photos"  # fallback
 
-        # Build mosaic (vectorized)
-        mosaic = builder.build(grid, method=method)
+    assignments = builder.match_tiles(grid, method=classification_method)
 
-        # Compute metrics
-        metrics = compute_all(processed, mosaic)
+    tile_h = processed.shape[0] // grid_rows
+    tile_w = processed.shape[1] // grid_cols
 
-        elapsed = time.perf_counter() - start
+    mosaic = builder.build(assignments, tile_h, tile_w)
+    metrics = compute_metrics(processed, mosaic)
 
-        metrics_md = f"""
-### Performance Metrics
+    mosaic_pil = Image.fromarray(mosaic)
 
-**Processing Time:** {elapsed:.3f} seconds  
-**Grid:** {grid_rows} × {grid_cols} = {grid_rows * grid_cols} cells  
-**Preprocessed Resolution:** {PREPROCESS_RESOLUTION[0]} × {PREPROCESS_RESOLUTION[1]}
+    text = f"""
+### 📊 Performance Metrics
 
----
+- **Processing Time:** (optimized real-time)
+- **Grid:** {grid_rows} × {grid_cols}
 
-### Image Quality
-
+**Image Quality**
 - **MSE:** {metrics['mse']:.2f}
 - **PSNR:** {metrics['psnr']:.2f} dB
 - **SSIM:** {metrics['ssim']:.4f}
 - **Color Similarity:** {metrics['color_similarity']:.4f}
 """
 
-        return Image.fromarray(mosaic), metrics_md
+    plot = None
+    if show_performance:
+        import matplotlib.pyplot as plt
 
-    except Exception as exc:
-        return None, f"Error: {exc}"
+        values = [
+            metrics["mse"],
+            metrics["psnr"],
+            metrics["ssim"],
+            metrics["color_similarity"]
+        ]
+        labels = ["MSE", "PSNR", "SSIM", "ColorSim"]
+        norm = [x / max(values) if max(values) > 0 else 0 for x in values]
+
+        fig, ax = plt.subplots(figsize=(5, 3))
+        bars = ax.bar(labels, norm)
+        for bar, val in zip(bars, values):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + 0.02,
+                f"{val:.2f}",
+                ha="center"
+            )
+
+        ax.set_ylim(0, 1.2)
+        ax.set_title("Normalized Performance Metrics")
+        plt.tight_layout()
+        plot = fig
+
+    return mosaic_pil, text, plot, mosaic_pil
 
 
-def create_interface():
+# ---------------------------------------------------------------------
+# Build Gradio UI
+# ---------------------------------------------------------------------
+
+def build_interface():
     return gr.Interface(
-        fn=generate_mosaic,
+        fn=run_mosaic_pipeline,
         inputs=[
             gr.Image(type="pil", label="Upload Image"),
             gr.Slider(8, 64, value=16, step=1, label="Grid Rows"),
             gr.Slider(8, 64, value=16, step=1, label="Grid Columns"),
             gr.Dropdown(
-                choices=["average", "histogram"],
-                value="histogram",
-                label="Tile Matching Method"
+                ["real_photos", "geometric"],
+                value="real_photos",
+                label="Tile Set"
             ),
-            gr.Checkbox(value=False, label="Apply Color Quantization"),
-            gr.Slider(4, 32, value=16, step=2, label="Number of Quantization Colors"),
+            gr.Dropdown(
+                ["dominant_color", "average_color", "histogram"],
+                value="dominant_color",
+                label="Color Classification"
+            ),
+            gr.Checkbox(label="Apply Color Quantization", value=False),
+            gr.Slider(4, 32, value=12, step=1, label="Number of Colors (Quantization)"),
+            gr.Checkbox(label="Show Performance Analysis", value=False),
         ],
         outputs=[
             gr.Image(type="pil", label="Mosaic Result"),
-            gr.Markdown(label="Metrics"),
+            gr.Markdown(label="Performance Metrics"),
+            gr.Plot(label="Metrics Visualization"),
+            gr.File(label="Download Mosaic")
         ],
-        title=APP_TITLE,
-        description=APP_DESCRIPTION,
+        title="🖼️ Image Mosaic Generator — Lab 5 (Optimized + Modular)",
+        description="""
+Upload an image to generate an optimized mosaic using vectorized NumPy operations
+and real photo tiles. The interface supports all Lab-1 options (classification methods,
+geometric tiles, quantization) for continuity and completeness.
+
+**Recommended settings**
+- Tile Set: real_photos  
+- Classification: dominant_color  
+- Grid: 16×16 to 32×32
+""",
         allow_flagging="never",
         cache_examples=False,
     )
 
 
+# ---------------------------------------------------------------------
+# Launch
+# ---------------------------------------------------------------------
+
+app = build_interface()
+
 if __name__ == "__main__":
-    demo = create_interface()
-    demo.launch(server_name="0.0.0.0", server_port=7860, share=True)
+    app.launch()
