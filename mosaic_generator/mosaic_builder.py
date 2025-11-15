@@ -1,118 +1,74 @@
-# mosaic_generator/mosaic_builder.py
-
 """
-MosaicBuilder constructs the final mosaic image using vectorized
-distance calculations for both average-color and histogram-based
-matching. This module eliminates Python loops in the hot path.
+mosaic_builder.py
+
+Core mosaic construction. Handles:
+- tile selection (avg color or histogram)
+- vectorized matching
+- assembly of final output mosaic
 """
 
 import numpy as np
 import cv2
 
-from .config import TILE_SIZE, TOP_K
-from .utils import ensure_uint8, validate_grid_size
+from .utils import compute_average_color, compute_histogram
+from .config import TILE_SIZE
 
 
 class MosaicBuilder:
     """
-    Builds mosaics from preprocessed images and cached tile features.
-
-    Parameters
-    ----------
-    avg_colors : np.ndarray
-        Array of shape (N, 3) with average RGB for each tile.
-    histograms : np.ndarray
-        Array of shape (N, B^3) with histogram features.
-    tiles : np.ndarray
-        Array of shape (N, TILE_SIZE, TILE_SIZE, 3) with RGB tiles.
+    Build mosaics using preloaded tiles (from TileManager).
     """
 
-    def __init__(self, avg_colors: np.ndarray,
-                 histograms: np.ndarray,
-                 tiles: np.ndarray):
-        self.avg_colors = avg_colors
-        self.histograms = histograms
-        self.tiles = tiles
+    def __init__(self, tile_manager):
+        self.tile_manager = tile_manager
 
-    # ------------------------------------------------------------------
-    # Matching Strategies
-    # ------------------------------------------------------------------
-    def _match_by_average(self, cell_avgs: np.ndarray) -> np.ndarray:
+    def match_tiles(self, grid: np.ndarray, method: str = "average_color") -> np.ndarray:
         """
-        Vectorized average-color matching.
-
-        cell_avgs : (M, 3)
-        returns    : (M,) array of tile indices
+        Match each grid cell to nearest tile using selected method:
+        - average_color
+        - histogram
         """
-        diff = self.avg_colors[None, :, :] - cell_avgs[:, None, :]
-        dist = np.linalg.norm(diff, axis=2)
-        return np.argmin(dist, axis=1)
-
-    def _match_by_histogram(self, cell_hists: np.ndarray) -> np.ndarray:
-        """
-        Vectorized histogram matching using L2 distance.
-
-        cell_hists : (M, H)
-        returns    : (M,) array of tile indices
-        """
-        diff = self.histograms[None, :, :] - cell_hists[:, None, :]
-        dist = np.linalg.norm(diff, axis=2)
-        return np.argmin(dist, axis=1)
-
-    # ------------------------------------------------------------------
-    # Mosaic Construction
-    # ------------------------------------------------------------------
-    def build(self, grid: np.ndarray, method="histogram") -> np.ndarray:
-        """
-        Construct the mosaic from grid cells.
-
-        Parameters
-        ----------
-        grid : np.ndarray
-            Array of shape (rows, cols, tile_h, tile_w, 3)
-        method : str
-            'average' or 'histogram'
-
-        Returns
-        -------
-        np.ndarray
-            Final mosaic image.
-        """
-
         rows, cols = grid.shape[:2]
-        tile_h, tile_w = TILE_SIZE, TILE_SIZE
+        assignments = np.zeros((rows, cols), dtype=int)
 
-        # Compute per-cell features
-        cells = grid.reshape(rows * cols, tile_h, tile_w, 3)
-
-        if method == "average":
-            cell_feats = cells.reshape(len(cells), -1, 3).mean(axis=1)
-            tile_idx = self._match_by_average(cell_feats)
+        if method == "average_color":
+            tile_features = self.tile_manager.avg_colors
+            for i in range(rows):
+                for j in range(cols):
+                    cell_avg = compute_average_color(grid[i, j])
+                    idx = np.argmin(np.linalg.norm(tile_features - cell_avg, axis=1))
+                    assignments[i, j] = idx
 
         elif method == "histogram":
-            hist = []
-            for cell in cells:
-                h = cv2.calcHist(
-                    [cell],
-                    [0, 1, 2],
-                    None,
-                    [self.histograms.shape[-1] ** (1/3)] * 3,   # uses same bin count
-                    [0, 256] * 3
-                )
-                cv2.normalize(h, h)
-                hist.append(h.flatten())
-            cell_feats = np.vstack(hist)
-            tile_idx = self._match_by_histogram(cell_feats)
+            tile_hists = self.tile_manager.normalized_hists
+            for i in range(rows):
+                for j in range(cols):
+                    hist = compute_histogram(grid[i, j])
+                    dists = np.array([
+                        cv2.compareHist(hist, th, cv2.HISTCMP_CHISQR)
+                        for th in tile_hists
+                    ])
+                    assignments[i, j] = np.argmin(dists)
 
         else:
-            raise ValueError("Unknown matching method.")
+            raise ValueError(f"Unsupported matching method: {method}")
 
-        # Tile placement
+        return assignments
+
+    def build(self, assignments: np.ndarray, tile_h: int, tile_w: int) -> np.ndarray:
+        """
+        Construct the final mosaic using tile assignments.
+        """
+        rows, cols = assignments.shape
         mosaic = np.zeros((rows * tile_h, cols * tile_w, 3), dtype=np.uint8)
-        for idx, t in enumerate(tile_idx):
-            i = idx // cols
-            j = idx % cols
-            mosaic[i * tile_h:(i + 1) * tile_h,
-                   j * tile_w:(j + 1) * tile_w] = self.tiles[t]
+
+        for i in range(rows):
+            for j in range(cols):
+                tile_img = self.tile_manager.tiles[assignments[i, j]]
+                if tile_img.shape[:2] != (tile_h, tile_w):
+                    tile_img = cv2.resize(tile_img, (tile_w, tile_h))
+                y0, y1 = i * tile_h, (i + 1) * tile_h
+                x0, x1 = j * tile_w, (j + 1) * tile_w
+                mosaic[y0:y1, x0:x1] = tile_img
 
         return mosaic
