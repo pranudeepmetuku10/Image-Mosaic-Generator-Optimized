@@ -1,14 +1,10 @@
-"""
-app.py
-
-Final Lab-5 Gradio application using the optimized modular mosaic generator.
-Compatible with Hugging Face Spaces and includes all Lab-1 UI features.
-"""
-
 import gradio as gr
 import numpy as np
+import matplotlib.pyplot as plt
 from PIL import Image
 import cv2
+import tempfile
+import os
 
 from mosaic_generator import (
     TileManager,
@@ -25,12 +21,7 @@ from mosaic_generator import (
 
 TILE_FOLDER = "tiles"  # Folder in your repo on HuggingFace
 
-tile_manager = TileManager(
-    tile_directory=TILE_FOLDER,
-    tile_size=(32, 32),
-    compute_histograms=True
-)
-
+tile_manager = TileManager(TILE_FOLDER)
 builder = MosaicBuilder(tile_manager)
 
 
@@ -51,11 +42,13 @@ def run_mosaic_pipeline(
     if image is None:
         return None, "Please upload an image.", None, None
 
+    # Convert PIL → NumPy
     if hasattr(image, "convert"):
         image_np = np.array(image.convert("RGB"))
     else:
         image_np = np.array(image)
 
+    # Preprocess image
     processed = ImageProcessor.preprocess(
         image_np,
         target_size=PREPROCESS_RESOLUTION,
@@ -63,14 +56,17 @@ def run_mosaic_pipeline(
         n_colors=int(quant_colors)
     )
 
+    # Slice into grid
     grid = ImageProcessor.slice_grid(processed, (grid_rows, grid_cols))
 
-    # geometric tile option is allowed for UI completeness
+    # Handle geometric fallback
     if tile_set == "geometric":
-        tile_set = "real_photos"  # fallback
+        tile_set = "real_photos"
 
+    # Tile matching
     assignments = builder.match_tiles(grid, method=classification_method)
 
+    # Build mosaic
     tile_h = processed.shape[0] // grid_rows
     tile_w = processed.shape[1] // grid_cols
 
@@ -79,12 +75,10 @@ def run_mosaic_pipeline(
 
     mosaic_pil = Image.fromarray(mosaic)
 
+    # Performance text
     text = f"""
 ### 📊 Performance Metrics
-
-- **Processing Time:** (optimized real-time)
 - **Grid:** {grid_rows} × {grid_cols}
-
 **Image Quality**
 - **MSE:** {metrics['mse']:.2f}
 - **PSNR:** {metrics['psnr']:.2f} dB
@@ -92,10 +86,9 @@ def run_mosaic_pipeline(
 - **Color Similarity:** {metrics['color_similarity']:.4f}
 """
 
+    # Plot performance metrics
     plot = None
     if show_performance:
-        import matplotlib.pyplot as plt
-
         values = [
             metrics["mse"],
             metrics["psnr"],
@@ -120,11 +113,16 @@ def run_mosaic_pipeline(
         plt.tight_layout()
         plot = fig
 
-    return mosaic_pil, text, plot, mosaic_pil
+    # Save mosaic to a temporary file (required for gr.File)
+    tmp_dir = tempfile.mkdtemp()
+    file_path = os.path.join(tmp_dir, "mosaic.png")
+    mosaic_pil.save(file_path)
+
+    return mosaic_pil, text, plot, file_path
 
 
 # ---------------------------------------------------------------------
-# Build Gradio UI
+# Build Gradio Interface
 # ---------------------------------------------------------------------
 
 def build_interface():
@@ -137,16 +135,16 @@ def build_interface():
             gr.Dropdown(
                 ["real_photos", "geometric"],
                 value="real_photos",
-                label="Tile Set"
+                label="Tile Set (Geometric for UI only)"
             ),
             gr.Dropdown(
                 ["dominant_color", "average_color", "histogram"],
                 value="dominant_color",
-                label="Color Classification"
+                label="Tile Matching Method"
             ),
             gr.Checkbox(label="Apply Color Quantization", value=False),
             gr.Slider(4, 32, value=12, step=1, label="Number of Colors (Quantization)"),
-            gr.Checkbox(label="Show Performance Analysis", value=False),
+            gr.Checkbox(label="Show Performance Visualization", value=False),
         ],
         outputs=[
             gr.Image(type="pil", label="Mosaic Result"),
@@ -157,22 +155,16 @@ def build_interface():
         title="🖼️ Image Mosaic Generator — Lab 5 (Optimized + Modular)",
         description="""
 Upload an image to generate an optimized mosaic using vectorized NumPy operations
-and real photo tiles. The interface supports all Lab-1 options (classification methods,
-geometric tiles, quantization) for continuity and completeness.
-
-**Recommended settings**
+and real photo tiles. The UI includes all Lab-1 options for continuity.
+**Recommended**
 - Tile Set: real_photos  
-- Classification: dominant_color  
-- Grid: 16×16 to 32×32
+- Method: dominant_color (fast mode)  
+- Grid: 16×16 → 32×32
 """,
         allow_flagging="never",
         cache_examples=False,
     )
 
-
-# ---------------------------------------------------------------------
-# Launch
-# ---------------------------------------------------------------------
 
 app = build_interface()
 

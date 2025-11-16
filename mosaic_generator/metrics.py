@@ -2,15 +2,20 @@
 metrics.py
 
 Compute MSE, PSNR, SSIM, and color similarity between images.
+Robust and compatible with all Lab-5 modules.
 """
 
 import numpy as np
 import cv2
 from skimage.metrics import structural_similarity as ssim
 
+from .utils import ensure_uint8
+
 
 def mse(a: np.ndarray, b: np.ndarray) -> float:
-    return float(np.mean((a.astype("float64") - b.astype("float64")) ** 2))
+    a = a.astype("float64")
+    b = b.astype("float64")
+    return float(np.mean((a - b) ** 2))
 
 
 def psnr(a: np.ndarray, b: np.ndarray) -> float:
@@ -19,7 +24,14 @@ def psnr(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def ssim_score(a: np.ndarray, b: np.ndarray) -> float:
-    return ssim(a, b, channel_axis=2, data_range=255)
+    """
+    SSIM may fail for small images or quantized outputs.
+    Fallback to 0.0 instead of crashing the app.
+    """
+    try:
+        return float(ssim(a, b, channel_axis=2, data_range=255))
+    except Exception:
+        return 0.0
 
 
 def color_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -32,7 +44,14 @@ def color_similarity(a: np.ndarray, b: np.ndarray) -> float:
 def compute_metrics(original: np.ndarray, mosaic: np.ndarray) -> dict:
     """
     Compute all metrics and return dictionary.
+    Ensures dtype correctness and shape alignment.
     """
+
+    # Ensure uint8 inputs
+    original = ensure_uint8(original)
+    mosaic = ensure_uint8(mosaic)
+
+    # Resize mosaic if needed
     if original.shape != mosaic.shape:
         mosaic = cv2.resize(mosaic, (original.shape[1], original.shape[0]))
 

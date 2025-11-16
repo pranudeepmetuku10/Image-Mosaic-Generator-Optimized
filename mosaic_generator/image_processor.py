@@ -2,7 +2,7 @@
 image_processor.py
 
 Handles image loading, resizing, preprocessing, grid slicing, and optional
-color quantization. Fully vectorized and optimized for Lab-5 performance requirements.
+color quantization. Fully vectorized and optimized for Lab-5 performance.
 """
 
 import numpy as np
@@ -10,6 +10,11 @@ import cv2
 from PIL import Image
 
 from .config import PREPROCESS_RESOLUTION
+from .utils import (
+    ensure_uint8,
+    pil_to_numpy,
+    validate_grid_size,
+)
 
 
 class ImageProcessor:
@@ -29,14 +34,21 @@ class ImageProcessor:
         Resize image with aspect ratio preserved and optional padding.
         Optionally apply color quantization using KMeans.
         """
+
+        # Accept PIL or NumPy input
+        if isinstance(image, Image.Image):
+            image = pil_to_numpy(image)
+
         h, w = image.shape[:2]
         target_h, target_w = target_size
 
+        # Maintain aspect ratio
         scale = min(target_h / h, target_w / w)
         new_h, new_w = int(h * scale), int(w * scale)
 
         resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
 
+        # Pad to target resolution
         top = (target_h - new_h) // 2
         bottom = target_h - new_h - top
         left = (target_w - new_w) // 2
@@ -52,7 +64,7 @@ class ImageProcessor:
         if apply_quantization:
             final_img = ImageProcessor.quantize(final_img, n_colors=n_colors)
 
-        return final_img
+        return ensure_uint8(final_img)
 
     @staticmethod
     def quantize(image: np.ndarray, n_colors: int = 8) -> np.ndarray:
@@ -77,12 +89,17 @@ class ImageProcessor:
         Returns array of shape (rows, cols, tile_h, tile_w, 3).
         """
         rows, cols = grid_size
-        h, w = image.shape[:2]
+        validate_grid_size(image.shape, grid_size)
 
+        h, w = image.shape[:2]
         tile_h, tile_w = h // rows, w // cols
+
         cropped = image[:rows * tile_h, :cols * tile_w]
 
         grid = cropped.reshape(rows, tile_h, cols, tile_w, 3)
         grid = grid.transpose(0, 2, 1, 3, 4)
+
+        # Safety check
+        assert grid.shape == (rows, cols, tile_h, tile_w, 3)
 
         return grid
